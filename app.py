@@ -1,17 +1,22 @@
-
+import os
 import re
 import spacy
-import openai
 from PyPDF2 import PdfReader
 import streamlit as st
+from dotenv import load_dotenv
+from groq import Groq
 
 # ------------------ CONFIG ------------------
-import os
-openai.api_key = os.getenv("OPENAI_API_KEY")
+load_dotenv()  # Load from .env file
+groq_api_key = os.getenv("GROQ_API_KEY")
 
-st.set_page_config(page_title="AI HR Assistant", layout="wide")
+if not groq_api_key:
+    st.error("🚨 GROQ_API_KEY not found! Please create a .env file.")
+    st.stop()
 
+client = Groq(api_key=groq_api_key)
 nlp = spacy.load("en_core_web_sm")
+st.set_page_config(page_title="AI HR Assistant", layout="wide")
 
 # ------------------ FUNCTIONS ------------------
 
@@ -38,198 +43,144 @@ def get_profile_data_from_text(text):
         "languages": {}
     }
 
-    # Extract email and phone
+    # Email and phone
     email = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
     phone = re.search(r'\+?\d[\d\-\s]{8,}\d', text)
     profile["email"] = email.group(0) if email else ""
     profile["phone"] = phone.group(0) if phone else ""
 
-    # Extract name using SpaCy
+    # Name (via SpaCy)
     doc = nlp(text)
     for ent in doc.ents:
         if ent.label_ == "PERSON":
             profile["name"] = ent.text
             break
 
-    # Extract sections by headers
+    # Section detection
     current_section = None
     for line in lines:
-        line_lower = line.lower()
-        if any(keyword in line_lower for keyword in ["objective", "summary", "profile"]):
+        lower = line.lower()
+        if any(k in lower for k in ["objective", "summary", "profile"]):
             current_section = "objective"
             profile["objective"] = ""
-        elif "project" in line_lower:
+        elif "project" in lower:
             current_section = "projects"
-        elif "skill" in line_lower:
+        elif "skill" in lower:
             current_section = "skills"
-        elif "education" in line_lower:
+        elif "education" in lower:
             current_section = "education"
-        elif "experience" in line_lower:
+        elif "experience" in lower:
             current_section = "experience"
-        elif "certificat" in line_lower:
+        elif "certificat" in lower:
             current_section = "certifications"
-        elif "achiev" in line_lower:
+        elif "achiev" in lower:
             current_section = "achievements"
-        elif "other skill" in line_lower:
-            current_section = "other_skills"
-        elif "language" in line_lower:
+        elif "language" in lower:
             current_section = "languages"
+        elif "other skill" in lower:
+            current_section = "other_skills"
         else:
-            # Append line to the right section
             if current_section == "objective":
                 profile["objective"] += " " + line
-            elif current_section == "skills":
-                profile["skills"].append(line)
-            elif current_section == "education":
-                profile["education"].append(line)
-            elif current_section == "experience":
-                profile["experience"].append(line)
-            elif current_section == "projects":
-                profile["projects"].append(line)
-            elif current_section == "certifications":
-                profile["certifications"].append(line)
-            elif current_section == "achievements":
-                profile["achievements"].append(line)
-            elif current_section == "other_skills":
-                profile["other_skills"].append(line)
-            elif current_section == "languages":
-                parts = line.split()
-                if len(parts) >= 2:
-                    lang = parts[0]
-                    prof = " ".join(parts[1:])
-                    profile["languages"][lang] = prof
-
-    # Remove duplicates and empty lines
-    for key in ["skills", "education", "experience", "projects", "certifications", "achievements", "other_skills"]:
-        profile[key] = [x for x in profile[key] if x]
+            elif current_section in profile and isinstance(profile[current_section], list):
+                profile[current_section].append(line)
 
     return profile
 
 # ----- LinkedIn Placeholder -----
 def get_profile_data_from_linkedin(linkedin_url):
-    # Placeholder for real LinkedIn scraping
     return {
         "name": "John Doe",
         "email": "john@example.com",
         "phone": "+123456789",
         "objective": "To work as a software engineer.",
-        "skills": ["Python","AWS","React"],
+        "skills": ["Python", "AWS", "React"],
         "education": ["B.Tech in Computer Science"],
         "experience": ["3 years as Software Engineer"],
-        "projects": ["Project X: AI automation tool"],
+        "projects": ["AI automation tool for HR"],
         "certifications": ["AWS Certified Solutions Architect"],
         "achievements": ["Employee of the Month"],
         "other_skills": ["Time Management", "Teamwork"],
-        "languages": {"English":"Full Professional"}
+        "languages": {"English": "Professional Proficiency"}
     }
 
-# ----- OpenAI Chat -----
-def generate_chatbot_response(user_input, candidate_profile):
-    context_str = "\n".join([
-        f"{k}: {', '.join(v) if isinstance(v,list) else v}" 
-        for k,v in candidate_profile.items()
+# ----- Chat with Groq -----
+def generate_chatbot_response(user_input, profile):
+    context = "\n".join([
+        f"{k}: {', '.join(v) if isinstance(v, list) else v}"
+        for k, v in profile.items()
     ])
-    response = openai.chat.completions.create(
-        model="gpt-3.5-turbo",
+    response = client.chat.completions.create(
+        model="llama-3.1-70b-versatile",
         messages=[
-            {"role": "system", "content": f"You are an HR assistant. Candidate info:\n{context_str}"},
+            {"role": "system", "content": f"You are an AI HR Assistant. Candidate details:\n{context}"},
             {"role": "user", "content": user_input}
-        ],
-        temperature=0.7,
-        max_tokens=300
+        ]
     )
     return response.choices[0].message.content.strip()
 
-# ------------------ SESSION STATE ------------------
-if "chats" not in st.session_state:
-    st.session_state.chats = {}
+# ------------------ STREAMLIT UI ------------------
 
-if "current_candidate" not in st.session_state:
-    st.session_state.current_candidate = None
-
-if "temp_profile" not in st.session_state:
-    st.session_state.temp_profile = {}
-
+# Initialize session variables
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-# ------------------ SIDEBAR ------------------
-st.sidebar.header("Upload / Fetch Candidate Profile")
-upload_option = st.sidebar.radio("Choose input method:", ["Upload Resume PDF", "LinkedIn URL"])
+candidate = None  # ✅ Initialize candidate to prevent NameError
+
+st.sidebar.header("Upload / Fetch Candidate")
+upload_option = st.sidebar.radio("Input method:", ["Upload Resume PDF", "LinkedIn URL"])
 
 if upload_option == "Upload Resume PDF":
-    uploaded_file = st.sidebar.file_uploader("Upload PDF", type=["pdf"])
+    uploaded_file = st.sidebar.file_uploader("Upload Resume (PDF)", type=["pdf"])
     if uploaded_file:
         text = extract_text_from_pdf(uploaded_file)
-        profile = get_profile_data_from_text(text)
-        st.session_state.temp_profile = profile
-        st.session_state.current_candidate = profile.get("name","Unknown Candidate")
-        st.session_state.chats[st.session_state.current_candidate] = profile
-
+        candidate = get_profile_data_from_text(text)
 elif upload_option == "LinkedIn URL":
-    linkedin_url = st.sidebar.text_input("Enter LinkedIn Profile URL")
+    linkedin_url = st.sidebar.text_input("LinkedIn Profile URL")
     if linkedin_url:
-        profile = get_profile_data_from_linkedin(linkedin_url)
-        st.session_state.temp_profile = profile
-        st.session_state.current_candidate = profile.get("name","Unknown Candidate")
-        st.session_state.chats[st.session_state.current_candidate] = profile
+        candidate = get_profile_data_from_linkedin(linkedin_url)
 
-# ------------------ MAIN APP ------------------
+# ------------------ MAIN CONTENT ------------------
 st.title("🤖 AI HR Assistant")
 
-if st.session_state.current_candidate:
-    candidate = st.session_state.chats.get(
-        st.session_state.current_candidate,
-        st.session_state.temp_profile
-    )
-
-    st.header(f"📄 Candidate Profile: {candidate.get('name','N/A')}")
+if candidate:
+    st.header(f"📄 Candidate: {candidate.get('name', 'Unknown')}")
     tabs = st.tabs([
-        "Basic Info", "Projects", "Skills", "Education", 
-        "Experience", "Certifications", "Achievements", 
-        "Languages", "Other Skills"
+        "Basic Info", "Skills", "Education", "Experience",
+        "Certifications", "Achievements"
     ])
 
     with tabs[0]:
-        st.write(candidate.get("objective",""))
-        st.write("Email:", candidate.get("email",""))
-        st.write("Phone:", candidate.get("phone",""))
+        st.write("**Objective:**", candidate.get("objective", ""))
+        st.write("**Email:**", candidate.get("email", ""))
+        st.write("**Phone:**", candidate.get("phone", ""))
 
     with tabs[1]:
-        st.write("\n".join(candidate.get("projects",[])))
+        st.write(", ".join(candidate.get("skills", [])))
 
     with tabs[2]:
-        st.write(", ".join(candidate.get("skills",[])))
+        st.write("\n".join(candidate.get("education", [])))
 
     with tabs[3]:
-        st.write("\n".join(candidate.get("education",[])))
+        st.write("\n".join(candidate.get("experience", [])))
 
     with tabs[4]:
-        st.write("\n".join(candidate.get("experience",[])))
+        st.write("\n".join(candidate.get("certifications", [])))
 
     with tabs[5]:
-        st.write("\n".join(candidate.get("certifications",[])))
-
-    with tabs[6]:
-        st.write("\n".join(candidate.get("achievements",[])))
-
-    with tabs[7]:
-        for lang, prof in candidate.get("languages",{}).items():
-            st.write(f"{lang}: {prof}")
-
-    with tabs[8]:
-        st.write("\n".join(candidate.get("other_skills",[])))
+        st.write("\n".join(candidate.get("achievements", [])))
 
     st.markdown("---")
-    st.header("💬 Chat with AI Assistant")
-    user_input = st.chat_input("Ask something about the candidate...")
+    st.subheader("💬 Chat with AI Assistant")
+    user_input = st.chat_input("Ask something about this candidate...")
+
     if user_input:
-        response = generate_chatbot_response(user_input, candidate)
-        st.session_state.chat_history.append({"user": user_input, "ai": response})
+        reply = generate_chatbot_response(user_input, candidate)
+        st.session_state.chat_history.append(("user", user_input))
+        st.session_state.chat_history.append(("assistant", reply))
 
-    for chat in st.session_state.chat_history:
-        st.chat_message("user").write(chat["user"])
-        st.chat_message("assistant").write(chat["ai"])
-
+    for role, message in st.session_state.chat_history:
+        with st.chat_message(role):
+            st.markdown(message)
 else:
-    st.info("Please upload a resume or enter LinkedIn URL to get started.")
+    st.info("Please upload a resume or enter a LinkedIn URL to continue.")
