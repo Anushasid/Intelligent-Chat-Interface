@@ -25,7 +25,7 @@ Automatically extracts candidate information such as:
 ### 💬 Interactive AI Chatbot
 
 * Chat with the AI assistant about the candidate’s profile
-* Ask questions like *“What are this candidate’s strengths?”* or *“Does this profile fit a software developer role?”*
+* Ask questions
 * Uses **Groq LLM (Llama 3.x)** for intelligent and contextual responses
 
 ### 🌐 Simple and Interactive Web Interface
